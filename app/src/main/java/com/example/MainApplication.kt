@@ -2,22 +2,25 @@ package com.example
 
 import android.app.Application
 import android.os.Build
+import android.util.Log
 
 class MainApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        // Pre-create WebView HTTP Code Cache directory to prevent Chromium opendir log error on cold start
         try {
             val jsCacheDir = java.io.File(cacheDir, "WebView/Default/HTTP Cache/Code Cache/js")
             if (!jsCacheDir.exists()) {
                 jsCacheDir.mkdirs()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (e: Throwable) {
+            Log.w("MainApplication", "Error initializing WebView cache dir", e)
         }
 
-        // Perform runtime APK signature verification check (V1/V2/V3)
-        com.example.util.SignatureVerification.verifySignature(this)
+        try {
+            com.example.util.SignatureVerification.verifySignature(this)
+        } catch (e: Throwable) {
+            Log.w("MainApplication", "Signature verification warning", e)
+        }
     }
 
     override fun getAttributionTag(): String? {
