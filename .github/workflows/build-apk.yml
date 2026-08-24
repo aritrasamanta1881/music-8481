@@ -181,20 +181,22 @@ jobs:
           RELEASE_TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
           RELEASE_TITLE="Debug APK Build #${{ github.run_number }}"
           
-          RELEASE_NOTES="### Automatically Generated Debug APK
+          cat << 'EOF' > release_notes.md
+### Automatically Generated Debug APK
 
 - **Build Source:** GitHub Actions workflow
 - **Run Number:** ${{ github.run_number }}
 - **Run Attempt:** ${{ github.run_attempt }}
-- **Commit SHA:** \`${{ github.sha }}\`
+- **Commit SHA:** `${{ github.sha }}`
 
 > [!NOTE]
-> This is a debug build intended for testing and development purposes. It is not a Google Play Store production release and is signed with a temporary debug keystore."
+> This is a debug build intended for testing and development purposes. It is not a Google Play Store production release and is signed with a temporary debug keystore.
+EOF
 
           echo "Creating GitHub Release with tag: $RELEASE_TAG"
           gh release create "$RELEASE_TAG" "$ASSET_PATH" \
             --title "$RELEASE_TITLE" \
-            --notes "$RELEASE_NOTES" \
+            --notes-file release_notes.md \
             --target "${{ github.sha }}" \
             --latest
 
