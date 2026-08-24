@@ -228,14 +228,18 @@ class MediaNotificationService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val defaultIcon = BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)
+        val defaultIcon = try {
+            BitmapFactory.decodeResource(resources, R.drawable.app_logo)
+        } catch (e: Throwable) {
+            null
+        }
         val displayIcon = artworkBitmap ?: defaultIcon
 
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(currentTitle)
             .setContentText(currentArtist)
             .setSubText("Music@8481")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_music_notification)
             .setLargeIcon(displayIcon)
             .setContentIntent(openAppPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
