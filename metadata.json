@@ -1,0 +1,6 @@
+{
+  "name": "Music@8481",
+  "description": "Full screen music webview app with offline caching and pull-to-refresh.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
