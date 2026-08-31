@@ -1,28 +1,36 @@
 package com.example
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.MainViewModel
@@ -114,12 +122,30 @@ class MainActivity : ComponentActivity() {
 fun MusicAppContent(
     viewModel: MainViewModel = viewModel()
 ) {
+    val context = LocalContext.current
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
     val pageProgress by viewModel.pageProgress.collectAsStateWithLifecycle()
     val isInitialLoading by viewModel.isInitialLoading.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val hasError by viewModel.hasError.collectAsStateWithLifecycle()
     val isAtTop by viewModel.isAtTop.collectAsStateWithLifecycle()
+
+    // Request notification permission on Android 13+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -151,7 +177,20 @@ fun MusicAppContent(
                     onPageFinished = { viewModel.onPageFinished() },
                     onPageError = { viewModel.onPageError() },
                     onScrollAtTop = { atTop -> viewModel.setScrollAtTop(atTop) },
-                    modifier = Modifier.weight(1f)
+                    mediaActionEvents = viewModel.mediaActionEvents,
+                    onMediaStateChanged = { title, artist, artworkUrl, isPlaying, currentTime, duration ->
+                        viewModel.updateNowPlaying(
+                            title = title,
+                            artist = artist,
+                            artworkUrl = artworkUrl,
+                            isPlaying = isPlaying,
+                            currentTime = currentTime,
+                            duration = duration
+                        )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
                 )
             }
 

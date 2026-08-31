@@ -82,41 +82,20 @@ jobs:
           fi
           echo "Debug keystore is ready."
 
-      - name: Ensure valid app branding and logo assets
+      - name: Verify app branding and icon assets
         run: |
-          echo "=== Verifying App Logo Assets ==="
+          echo "=== Verifying App Logo and Mipmap Assets ==="
           LOGO_PATH="app/src/main/res/drawable/app_logo.png"
-          LOGO_URL="https://raw.githubusercontent.com/Ayush8481Lab/musicayush/refs/heads/main/app/android-chrome-512x512.png"
 
-          if [ ! -f "$LOGO_PATH" ] || [ ! -s "$LOGO_PATH" ] || [ $(wc -c < "$LOGO_PATH") -lt 10000 ]; then
-            echo "app_logo.png is missing or broken. Downloading fresh logo from website..."
-            mkdir -p app/src/main/res/drawable
-            curl -sSL "$LOGO_URL" -o "$LOGO_PATH"
+          if [ ! -f "$LOGO_PATH" ] || [ ! -s "$LOGO_PATH" ]; then
+            echo "::error::app_logo.png is missing or empty in repository!"
+            exit 1
           fi
 
-          python3 -c "
-          import urllib.request, subprocess, os
-          logo = '$LOGO_PATH'
-          if not os.path.exists(logo) or os.path.getsize(logo) < 10000:
-              url = '$LOGO_URL'
-              req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-              with urllib.request.urlopen(req) as resp:
-                  with open(logo, 'wb') as f:
-                      f.write(resp.read())
-
-          sizes = {'mipmap-mdpi': '48x48', 'mipmap-hdpi': '72x72', 'mipmap-xhdpi': '96x96', 'mipmap-xxhdpi': '144x144', 'mipmap-xxxhdpi': '192x192'}
-          for fld, sz in sizes.items():
-              os.makedirs(f'app/src/main/res/{fld}', exist_ok=True)
-              subprocess.run(['convert', logo, '-resize', sz, f'app/src/main/res/{fld}/ic_launcher.png'], check=False)
-              subprocess.run(['convert', logo, '-resize', sz, f'app/src/main/res/{fld}/ic_launcher_round.png'], check=False)
-
-          fg_sizes = {'drawable': '108x108', 'drawable-mdpi': '108x108', 'drawable-hdpi': '162x162', 'drawable-xhdpi': '216x216', 'drawable-xxhdpi': '324x324', 'drawable-xxxhdpi': '432x432'}
-          for fld, sz in fg_sizes.items():
-              os.makedirs(f'app/src/main/res/{fld}', exist_ok=True)
-              subprocess.run(['convert', logo, '-resize', sz, '-gravity', 'center', '-extent', sz, f'app/src/main/res/{fld}/ic_launcher_foreground.png'], check=False)
-          " || true
-
-          echo "App logo and mipmap icons verified successfully: $(ls -lh $LOGO_PATH)"
+          echo "App logo is present ($(ls -lh $LOGO_PATH))."
+          echo "Verifying launcher icons across all mipmap densities:"
+          ls -la app/src/main/res/mipmap-*/
+          ls -la app/src/main/res/drawable*/ic_launcher_foreground.png
 
       - name: Build debug APK
         run: |

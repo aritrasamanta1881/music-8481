@@ -4,9 +4,13 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
+import com.example.ui.model.NowPlayingState
 import com.example.util.NetworkObserver
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -31,6 +35,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isAtTop = MutableStateFlow(true)
     val isAtTop: StateFlow<Boolean> = _isAtTop.asStateFlow()
+
+    private val _nowPlayingState = MutableStateFlow(NowPlayingState())
+    val nowPlayingState: StateFlow<NowPlayingState> = _nowPlayingState.asStateFlow()
+
+    private val _mediaActionEvents = MutableSharedFlow<String>(extraBufferCapacity = 5)
+    val mediaActionEvents: SharedFlow<String> = _mediaActionEvents.asSharedFlow()
+
+    private var userDismissed = false
 
     val targetUrl: String = try {
         val configuredUrl = BuildConfig.APP_URL
@@ -93,5 +105,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissError() {
         _hasError.value = false
+    }
+
+    fun updateNowPlaying(
+        title: String,
+        artist: String,
+        artworkUrl: String,
+        isPlaying: Boolean,
+        currentTime: Float,
+        duration: Float
+    ) {
+        // If song changed (different title), reset userDismissed flag so banner appears for new song
+        val currentTitle = _nowPlayingState.value.title
+        if (title.isNotBlank() && title != currentTitle) {
+            userDismissed = false
+        }
+
+        val shouldBeVisible = !userDismissed && (title.isNotBlank() || isPlaying || currentTime > 0f)
+
+        _nowPlayingState.update { current ->
+            current.copy(
+                title = title,
+                artist = artist,
+                artworkUrl = artworkUrl,
+                isPlaying = isPlaying,
+                currentTimeSeconds = currentTime,
+                durationSeconds = duration,
+                isVisible = shouldBeVisible
+            )
+        }
+    }
+
+    fun dismissBanner() {
+        userDismissed = true
+        _nowPlayingState.update { it.copy(isVisible = false) }
+    }
+
+    fun togglePlayPause() {
+        viewModelScope.launch {
+            if (_nowPlayingState.value.isPlaying) {
+                _mediaActionEvents.emit("pause")
+            } else {
+                _mediaActionEvents.emit("play")
+            }
+        }
+    }
+
+    fun skipNext() {
+        viewModelScope.launch {
+            _mediaActionEvents.emit("next")
+        }
+    }
+
+    fun skipPrevious() {
+        viewModelScope.launch {
+            _mediaActionEvents.emit("previous")
+        }
+    }
+
+    fun seekTo(seconds: Float) {
+        viewModelScope.launch {
+            _mediaActionEvents.emit("seek:$seconds")
+        }
     }
 }

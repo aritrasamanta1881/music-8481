@@ -7,7 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.graphics.drawable.BitmapDrawable
 import android.os.Build
 import android.os.IBinder
 import android.support.v4.media.MediaMetadataCompat
@@ -15,6 +15,9 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
+import coil.ImageLoader
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import com.example.MainActivity
 import com.example.R
 import kotlinx.coroutines.CoroutineScope
@@ -22,14 +25,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.URL
 
 object MediaControllerHelper {
     var onActionReceived: ((String) -> Unit)? = null
 
-    fun sendActionToWebView(action: String) {
-        onActionReceived?.invoke(action)
-    }
+    var currentTitle: String = ""
+    var currentArtist: String = ""
+    var currentArtworkUrl: String = ""
+    var currentIsPlaying: Boolean = false
 
     fun updateState(
         context: Context,
@@ -38,20 +41,27 @@ object MediaControllerHelper {
         artworkUrl: String,
         isPlaying: Boolean
     ) {
+        currentTitle = title
+        currentArtist = artist
+        currentArtworkUrl = artworkUrl
+        currentIsPlaying = isPlaying
+
         val intent = Intent(context, MediaNotificationService::class.java).apply {
-            putExtra("EXTRA_TITLE", title)
-            putExtra("EXTRA_ARTIST", artist)
-            putExtra("EXTRA_ARTWORK", artworkUrl)
-            putExtra("EXTRA_IS_PLAYING", isPlaying)
+            putExtra(MediaNotificationService.EXTRA_TITLE, title)
+            putExtra(MediaNotificationService.EXTRA_ARTIST, artist)
+            putExtra(MediaNotificationService.EXTRA_ARTWORK, artworkUrl)
+            putExtra(MediaNotificationService.EXTRA_IS_PLAYING, isPlaying)
         }
-        try {
+
+        if (isPlaying) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } else {
+            // Send update to existing service (e.g. paused state)
+            context.startService(intent)
         }
     }
 
@@ -59,31 +69,31 @@ object MediaControllerHelper {
         val intent = Intent(context, MediaNotificationService::class.java)
         context.stopService(intent)
     }
+
+    fun sendActionToWebView(action: String) {
+        onActionReceived?.invoke(action)
+    }
 }
 
 class MediaNotificationService : Service() {
 
-    private val CHANNEL_ID = "music_playback_channel"
-    private val NOTIFICATION_ID = 8481
-
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var notificationManager: NotificationManager
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
-
-    private var currentTitle: String = ""
-    private var currentArtist: String = ""
-    private var currentArtworkUrl: String = ""
+    private var imageLoadingJob: Job? = null
     private var currentBitmap: Bitmap? = null
-    var isPlaying: Boolean = false
-        private set
+
+    private var songTitle = ""
+    private var songArtist = ""
+    private var songArtworkUrl = ""
+    private var isPlaying = false
 
     override fun onCreate() {
         super.onCreate()
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createNotificationChannel()
 
-        mediaSession = MediaSessionCompat(this, "MusicNotificationService").apply {
-            isActive = true
+        mediaSession = MediaSessionCompat(this, "GaanaMediaSession").apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
                     MediaControllerHelper.sendActionToWebView("play")
@@ -100,186 +110,226 @@ class MediaNotificationService : Service() {
                 override fun onSkipToPrevious() {
                     MediaControllerHelper.sendActionToWebView("previous")
                 }
+
+                override fun onStop() {
+                    stopPlaybackService()
+                }
             })
+            isActive = true
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.let {
-            val action = it.action
-            if (action != null) {
-                when (action) {
-                    ACTION_PLAY -> MediaControllerHelper.sendActionToWebView("play")
-                    ACTION_PAUSE -> MediaControllerHelper.sendActionToWebView("pause")
-                    ACTION_NEXT -> MediaControllerHelper.sendActionToWebView("next")
-                    ACTION_PREVIOUS -> MediaControllerHelper.sendActionToWebView("previous")
-                    ACTION_STOP -> {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                        return START_NOT_STICKY
-                    }
+        if (intent != null) {
+            when (intent.action) {
+                ACTION_PLAY -> {
+                    MediaControllerHelper.sendActionToWebView("play")
+                    return START_STICKY
                 }
-            } else {
-                val title = it.getStringExtra("EXTRA_TITLE") ?: ""
-                val artist = it.getStringExtra("EXTRA_ARTIST") ?: ""
-                val artworkUrl = it.getStringExtra("EXTRA_ARTWORK") ?: ""
-                val playing = it.getBooleanExtra("EXTRA_IS_PLAYING", false)
+                ACTION_PAUSE -> {
+                    MediaControllerHelper.sendActionToWebView("pause")
+                    return START_STICKY
+                }
+                ACTION_NEXT -> {
+                    MediaControllerHelper.sendActionToWebView("next")
+                    return START_STICKY
+                }
+                ACTION_PREVIOUS -> {
+                    MediaControllerHelper.sendActionToWebView("previous")
+                    return START_STICKY
+                }
+                ACTION_STOP, ACTION_DISMISS -> {
+                    stopPlaybackService()
+                    return START_NOT_STICKY
+                }
+            }
 
-                updateMediaData(title, artist, artworkUrl, playing)
+            val newTitle = intent.getStringExtra(EXTRA_TITLE) ?: songTitle
+            val newArtist = intent.getStringExtra(EXTRA_ARTIST) ?: songArtist
+            val newArtwork = intent.getStringExtra(EXTRA_ARTWORK) ?: songArtworkUrl
+            val newPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, isPlaying)
+
+            val artworkChanged = newArtwork != songArtworkUrl && newArtwork.isNotBlank()
+
+            songTitle = newTitle
+            songArtist = newArtist
+            songArtworkUrl = newArtwork
+            isPlaying = newPlaying
+
+            if (songTitle.isBlank() && !isPlaying) {
+                stopPlaybackService()
+                return START_NOT_STICKY
+            }
+
+            updateMediaSessionState()
+
+            if (artworkChanged) {
+                loadArtworkAndShow(songArtworkUrl)
+            } else {
+                showNotification(currentBitmap)
             }
         }
+
         return START_STICKY
     }
 
-    private fun updateMediaData(title: String, artist: String, artworkUrl: String, playing: Boolean) {
-        val titleText = title.ifBlank { getString(R.string.app_name) }
-        val artistText = artist.ifBlank { "Playing" }
-
-        val artworkChanged = artworkUrl != currentArtworkUrl
-
-        currentTitle = titleText
-        currentArtist = artistText
-        isPlaying = playing
-
-        // Always show notification synchronously first so startForeground is called immediately
+    private fun loadArtworkAndShow(url: String) {
+        imageLoadingJob?.cancel()
+        // First show notification with current/fallback bitmap
         showNotification(currentBitmap)
 
-        if (artworkChanged && artworkUrl.isNotBlank()) {
-            currentArtworkUrl = artworkUrl
-            loadArtwork(artworkUrl)
-        }
-    }
+        if (url.isBlank()) return
 
-    private fun loadArtwork(urlStr: String) {
-        serviceScope.launch {
-            val bitmap = withContext(Dispatchers.IO) {
-                try {
-                    val url = URL(urlStr)
-                    BitmapFactory.decodeStream(url.openStream())
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    null
+        imageLoadingJob = serviceScope.launch {
+            try {
+                val imageLoader = ImageLoader(this@MediaNotificationService)
+                val request = ImageRequest.Builder(this@MediaNotificationService)
+                    .data(url)
+                    .allowHardware(false)
+                    .build()
+
+                val result = withContext(Dispatchers.IO) {
+                    imageLoader.execute(request)
                 }
-            }
-            if (bitmap != null) {
-                currentBitmap = bitmap
-                showNotification(bitmap)
-            }
+
+                if (result is SuccessResult) {
+                    val bitmap = (result.drawable as? BitmapDrawable)?.bitmap
+                    if (bitmap != null) {
+                        currentBitmap = bitmap
+                        showNotification(bitmap)
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
     private fun showNotification(artworkBitmap: Bitmap?) {
-        val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
-        val playbackState = PlaybackStateCompat.Builder()
-            .setActions(
-                PlaybackStateCompat.ACTION_PLAY or
-                        PlaybackStateCompat.ACTION_PAUSE or
-                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-            )
-            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
-            .build()
-        mediaSession.setPlaybackState(playbackState)
+        val displayTitle = if (songTitle.isNotBlank()) songTitle else getString(R.string.app_name)
+        val displayArtist = if (songArtist.isNotBlank()) songArtist else "Ayush Gaana"
 
-        val metadataBuilder = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentTitle)
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, currentArtist)
-
-        if (artworkBitmap != null) {
-            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap)
-        }
-        mediaSession.setMetadata(metadataBuilder.build())
-
-        // Open App PendingIntent
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val openAppPendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            openAppIntent,
+        val openAppIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Action PendingIntents
+        val dismissIntent = PendingIntent.getService(
+            this, 5,
+            Intent(this, MediaNotificationService::class.java).apply { action = ACTION_DISMISS },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val prevPendingIntent = PendingIntent.getService(
-            this,
-            1,
+            this, 1,
             Intent(this, MediaNotificationService::class.java).apply { action = ACTION_PREVIOUS },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val playPauseAction = if (isPlaying) ACTION_PAUSE else ACTION_PLAY
-        val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        val playPauseIcon = if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play_arrow
         val playPauseTitle = if (isPlaying) "Pause" else "Play"
 
         val playPausePendingIntent = PendingIntent.getService(
-            this,
-            2,
+            this, 2,
             Intent(this, MediaNotificationService::class.java).apply { action = playPauseAction },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val nextPendingIntent = PendingIntent.getService(
-            this,
-            3,
+            this, 3,
             Intent(this, MediaNotificationService::class.java).apply { action = ACTION_NEXT },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val defaultIcon = try {
-            BitmapFactory.decodeResource(resources, R.drawable.app_logo)
-        } catch (e: Throwable) {
-            null
-        }
-        val displayIcon = artworkBitmap ?: defaultIcon
+        val mediaStyle = MediaStyle()
+            .setMediaSession(mediaSession.sessionToken)
+            .setShowActionsInCompactView(0, 1, 2)
+            .setShowCancelButton(true)
+            .setCancelButtonIntent(dismissIntent)
 
         val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(currentTitle)
-            .setContentText(currentArtist)
-            .setSubText("Music@8481")
+            .setStyle(mediaStyle)
+            .setContentTitle(displayTitle)
+            .setContentText(displayArtist)
+            .setSubText(getString(R.string.app_name))
             .setSmallIcon(R.drawable.ic_music_notification)
-            .setLargeIcon(displayIcon)
-            .setContentIntent(openAppPendingIntent)
+            .setContentIntent(openAppIntent)
+            .setDeleteIntent(dismissIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOnlyAlertOnce(true)
-            // Not removable while music is playing, removable when paused
-            .setOngoing(isPlaying)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", prevPendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addAction(R.drawable.ic_skip_previous, "Previous", prevPendingIntent)
             .addAction(playPauseIcon, playPauseTitle, playPausePendingIntent)
-            .addAction(android.R.drawable.ic_media_next, "Next", nextPendingIntent)
-            .setStyle(
-                MediaStyle()
-                    .setShowActionsInCompactView(0, 1, 2)
-                    .setMediaSession(mediaSession.sessionToken)
-            )
+            .addAction(R.drawable.ic_skip_next, "Next", nextPendingIntent)
 
-        val notification = notificationBuilder.build()
+        if (artworkBitmap != null) {
+            notificationBuilder.setLargeIcon(artworkBitmap)
+        }
 
-        // ALWAYS call startForeground first to fulfill Android 8+ startForegroundService contract
-        startForeground(NOTIFICATION_ID, notification)
+        if (isPlaying) {
+            // When playing: Ongoing foreground service notification (keeps background playback alive)
+            notificationBuilder.setOngoing(true)
+            val notification = notificationBuilder.build()
+            startForeground(NOTIFICATION_ID, notification)
+        } else {
+            // When paused: Non-ongoing so user can swipe it away and dismiss it freely!
+            notificationBuilder.setOngoing(false)
+            notificationBuilder.setAutoCancel(true)
+            val notification = notificationBuilder.build()
 
-        if (!isPlaying) {
+            // Detach from foreground state so notification becomes removable/swipeable
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_DETACH)
             } else {
                 @Suppress("DEPRECATION")
                 stopForeground(false)
             }
+
             notificationManager.notify(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun updateMediaSessionState() {
+        val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+        val playbackState = PlaybackStateCompat.Builder()
+            .setActions(
+                PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_STOP
+            )
+            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .build()
+        mediaSession.setPlaybackState(playbackState)
+
+        val metadata = MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, songTitle)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, songArtist)
+            .build()
+        mediaSession.setMetadata(metadata)
+    }
+
+    private fun stopPlaybackService() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        notificationManager.cancel(NOTIFICATION_ID)
+        stopSelf()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Music Playback Controls",
+                "Media Playback",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Shows media notification controls for currently playing song"
+                description = "Music playback controls and song info"
                 setShowBadge(false)
             }
             notificationManager.createNotificationChannel(channel)
@@ -287,6 +337,8 @@ class MediaNotificationService : Service() {
     }
 
     override fun onDestroy() {
+        imageLoadingJob?.cancel()
+        mediaSession.isActive = false
         mediaSession.release()
         super.onDestroy()
     }
@@ -294,10 +346,19 @@ class MediaNotificationService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        const val CHANNEL_ID = "gaana_media_channel"
+        const val NOTIFICATION_ID = 8481
+
+        const val EXTRA_TITLE = "extra_title"
+        const val EXTRA_ARTIST = "extra_artist"
+        const val EXTRA_ARTWORK = "extra_artwork"
+        const val EXTRA_IS_PLAYING = "extra_is_playing"
+
         const val ACTION_PLAY = "com.example.service.ACTION_PLAY"
         const val ACTION_PAUSE = "com.example.service.ACTION_PAUSE"
         const val ACTION_NEXT = "com.example.service.ACTION_NEXT"
         const val ACTION_PREVIOUS = "com.example.service.ACTION_PREVIOUS"
         const val ACTION_STOP = "com.example.service.ACTION_STOP"
+        const val ACTION_DISMISS = "com.example.service.ACTION_DISMISS"
     }
 }

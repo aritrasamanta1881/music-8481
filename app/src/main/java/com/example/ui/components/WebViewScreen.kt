@@ -3,6 +3,7 @@ package com.example.ui.components
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,6 +12,7 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -38,6 +40,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import com.example.service.MediaControllerHelper
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -45,6 +48,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.R
 import com.example.ui.theme.DarkBackground
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -60,13 +67,52 @@ fun WebViewScreen(
     onPageFinished: () -> Unit,
     onPageError: () -> Unit,
     onScrollAtTop: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    mediaActionEvents: kotlinx.coroutines.flow.SharedFlow<String>? = null,
+    onMediaStateChanged: ((title: String, artist: String, artworkUrl: String, isPlaying: Boolean, currentTime: Float, duration: Float) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val appName = context.getString(R.string.app_name)
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
     var pendingPermissionRequest by remember { mutableStateOf<PermissionRequest?>(null) }
+
+    // Collect external media actions (play, pause, next, previous, seek) and execute in WebView
+    LaunchedEffect(webViewRef, mediaActionEvents) {
+        MediaControllerHelper.onActionReceived = { action ->
+            webViewRef?.post {
+                if (action.startsWith("seek:")) {
+                    val sec = action.removePrefix("seek:").toFloatOrNull() ?: 0f
+                    webViewRef?.evaluateJavascript(
+                        "if (window.__triggerMediaAction) window.__triggerMediaAction('seek', $sec);",
+                        null
+                    )
+                } else {
+                    webViewRef?.evaluateJavascript(
+                        "if (window.__triggerMediaAction) window.__triggerMediaAction('$action');",
+                        null
+                    )
+                }
+            }
+        }
+
+        mediaActionEvents?.collect { action ->
+            webViewRef?.post {
+                if (action.startsWith("seek:")) {
+                    val sec = action.removePrefix("seek:").toFloatOrNull() ?: 0f
+                    webViewRef?.evaluateJavascript(
+                        "if (window.__triggerMediaAction) window.__triggerMediaAction('seek', $sec);",
+                        null
+                    )
+                } else {
+                    webViewRef?.evaluateJavascript(
+                        "if (window.__triggerMediaAction) window.__triggerMediaAction('$action');",
+                        null
+                    )
+                }
+            }
+        }
+    }
 
     // Pre-create app storage directories (appName/music and appName/video)
     LaunchedEffect(Unit) {
@@ -99,28 +145,6 @@ fun WebViewScreen(
     val storagePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ -> }
-
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { _ -> }
-
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-    }
-
-    LaunchedEffect(webViewRef) {
-        com.example.service.MediaControllerHelper.onActionReceived = { action ->
-            webViewRef?.post {
-                webViewRef?.evaluateJavascript("if (window.__triggerMediaAction) window.__triggerMediaAction('$action');", null)
-            }
-        }
-    }
 
     // Intercept back button to navigate back inside web view history if possible
     BackHandler(enabled = canGoBack) {
@@ -179,12 +203,10 @@ fun WebViewScreen(
                             "AndroidDownloadBridge"
                         )
 
-                        // JS Interface for Media Notification State
+                        // JS Interface for Live Media State Synchronization
                         addJavascriptInterface(
-                            AndroidMediaBridge(ctx) { title, artist, artworkUrl, isPlaying ->
-                                com.example.service.MediaControllerHelper.updateState(
-                                    ctx, title, artist, artworkUrl, isPlaying
-                                )
+                            AndroidMediaBridge(ctx) { title, artist, artworkUrl, isPlaying, currentTime, duration ->
+                                onMediaStateChanged?.invoke(title, artist, artworkUrl, isPlaying, currentTime, duration)
                             },
                             "AndroidMediaBridge"
                         )
@@ -294,7 +316,7 @@ fun WebViewScreen(
                                         if (!window.__mediaBridgeInjected) {
                                             window.__mediaBridgeInjected = true;
 
-                                            // Intercept setter for navigator.mediaSession.metadata to get instant updates
+                                            // Intercept setter for navigator.mediaSession.metadata
                                             if ('mediaSession' in navigator) {
                                                 var ms = navigator.mediaSession;
                                                 var _meta = ms.metadata;
@@ -303,7 +325,7 @@ fun WebViewScreen(
                                                         get: function() { return _meta; },
                                                         set: function(val) {
                                                             _meta = val;
-                                                            setTimeout(notifyAndroid, 50);
+                                                            setTimeout(notifyAndroidMedia, 50);
                                                         },
                                                         configurable: true,
                                                         enumerable: true
@@ -311,56 +333,105 @@ fun WebViewScreen(
                                                 } catch(e) {}
                                             }
 
-                                            function notifyAndroid() {
-                                                try {
-                                                    var meta = (navigator.mediaSession && navigator.mediaSession.metadata) ? navigator.mediaSession.metadata : null;
-                                                    var title = meta ? (meta.title || '') : '';
-                                                    var artist = meta ? (meta.artist || '') : '';
-                                                    var artwork = '';
-                                                    if (meta && meta.artwork && meta.artwork.length > 0) {
-                                                        var last = meta.artwork[meta.artwork.length - 1];
-                                                        artwork = last ? (last.src || '') : '';
-                                                    }
+                                        function extractMeta() {
+                                            var title = '';
+                                            var artist = '';
+                                            var artwork = '';
 
-                                                    var audio = document.querySelector('audio');
-                                                    var isPlaying = false;
-
-                                                    if (audio) {
-                                                        isPlaying = !audio.paused && !audio.ended && audio.readyState > 0;
-                                                    }
-                                                    if (navigator.mediaSession && navigator.mediaSession.playbackState) {
-                                                        if (navigator.mediaSession.playbackState === 'playing') isPlaying = true;
-                                                        else if (navigator.mediaSession.playbackState === 'paused') isPlaying = false;
-                                                    }
-
-                                                    // Fallback to DOM elements inside player container if mediaSession title is empty
-                                                    if (!title) {
-                                                        var player = document.querySelector('footer, [class*="bottom-"], [class*="fixed bottom"], [class*="MiniPlayer"], [class*="player"]');
-                                                        if (player) {
-                                                            var elTitle = player.querySelector('[class*="title"], [class*="song"], [class*="track"], strong, b');
-                                                            if (elTitle) title = elTitle.innerText.trim();
-                                                            var elArtist = player.querySelector('[class*="artist"], [class*="singer"], [class*="sub"]');
-                                                            if (elArtist) artist = elArtist.innerText.trim();
-                                                        }
-                                                    }
-
-                                                    // Clean HTML entities if any
-                                                    if (title) {
-                                                        title = title.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-                                                    }
-                                                    if (artist) {
-                                                        artist = artist.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-                                                    }
-
-                                                    if (window.AndroidMediaBridge) {
-                                                        if (title || isPlaying || (audio && audio.currentTime > 0)) {
-                                                            window.AndroidMediaBridge.onMediaStateChanged(title, artist, artwork, isPlaying);
-                                                        }
-                                                    }
-                                                } catch(e) {
-                                                    console.error(e);
+                                            if (navigator.mediaSession && navigator.mediaSession.metadata) {
+                                                var m = navigator.mediaSession.metadata;
+                                                if (m.title && m.title.trim()) title = m.title.trim();
+                                                if (m.artist && m.artist.trim()) artist = m.artist.trim();
+                                                if (m.artwork && m.artwork.length > 0) {
+                                                    var last = m.artwork[m.artwork.length - 1];
+                                                    if (last && last.src) artwork = last.src;
                                                 }
                                             }
+
+                                            // Check player container DOM elements if mediaSession metadata is not set yet
+                                            if (!title || !artist) {
+                                                var player = document.querySelector('footer, [class*="player" i], [class*="bottom" i], [class*="controls" i], [class*="now-playing" i], [id*="player" i]');
+                                                if (player) {
+                                                    if (!title) {
+                                                        var elTitle = player.querySelector('[class*="title" i], [class*="song" i], [class*="track" i], [data-testid*="title" i], [data-testid*="track" i], h1, h2, h3, h4, strong');
+                                                        if (elTitle && elTitle.innerText && elTitle.innerText.trim()) {
+                                                            title = elTitle.innerText.trim();
+                                                        }
+                                                    }
+                                                    if (!artist) {
+                                                        var elArtist = player.querySelector('[class*="artist" i], [class*="singer" i], [class*="author" i], [class*="sub" i], [data-testid*="artist" i], p, span');
+                                                        if (elArtist && elArtist.innerText && elArtist.innerText.trim()) {
+                                                            artist = elArtist.innerText.trim();
+                                                        }
+                                                    }
+                                                    if (!artwork) {
+                                                        var img = player.querySelector('img');
+                                                        if (img && img.src && !img.src.includes('data:image/svg')) {
+                                                            artwork = img.src;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Fallback to document.title
+                                            if (!title) {
+                                                var docTitle = document.title || '';
+                                                docTitle = docTitle.replace(/ - Ayushgaana/gi, '').replace(/ \| Ayushgaana/gi, '').replace(/ - Gaana/gi, '').replace(/ - Music/gi, '').trim();
+                                                if (docTitle && docTitle.toLowerCase() !== 'ayushgaana' && docTitle.toLowerCase() !== 'home' && docTitle.toLowerCase() !== 'gaana') {
+                                                    if (docTitle.includes(' - ')) {
+                                                        var parts = docTitle.split(' - ');
+                                                        title = parts[0].trim();
+                                                        if (!artist && parts.length > 1) artist = parts[1].trim();
+                                                    } else {
+                                                        title = docTitle;
+                                                    }
+                                                }
+                                            }
+
+                                            // Clean HTML entities if any
+                                            if (title) {
+                                                title = title.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+                                            }
+                                            if (artist) {
+                                                artist = artist.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+                                            }
+
+                                            return { title: title, artist: artist, artwork: artwork };
+                                        }
+
+                                        function notifyAndroidMedia() {
+                                            try {
+                                                var meta = extractMeta();
+                                                var audio = document.querySelector('audio');
+                                                var isPlaying = false;
+                                                var currentTime = 0;
+                                                var duration = 0;
+
+                                                if (audio) {
+                                                    isPlaying = !audio.paused && !audio.ended && audio.readyState > 0;
+                                                    currentTime = audio.currentTime || 0;
+                                                    duration = audio.duration || 0;
+                                                }
+
+                                                if (navigator.mediaSession && navigator.mediaSession.playbackState) {
+                                                    if (navigator.mediaSession.playbackState === 'playing') isPlaying = true;
+                                                    else if (navigator.mediaSession.playbackState === 'paused') isPlaying = false;
+                                                }
+
+                                                if (window.AndroidMediaBridge) {
+                                                    window.AndroidMediaBridge.onMediaStateChanged(
+                                                        meta.title,
+                                                        meta.artist,
+                                                        meta.artwork,
+                                                        isPlaying,
+                                                        currentTime,
+                                                        duration
+                                                    );
+                                                }
+                                            } catch(e) {
+                                                console.error(e);
+                                            }
+                                        }
 
                                             if ('mediaSession' in navigator) {
                                                 var ms = navigator.mediaSession;
@@ -377,7 +448,7 @@ fun WebViewScreen(
                                                 };
                                             }
 
-                                            window.__triggerMediaAction = function(action) {
+                                            window.__triggerMediaAction = function(action, arg) {
                                                 if (action === 'play') {
                                                     if (window.__mediaHandlers && typeof window.__mediaHandlers['play'] === 'function') {
                                                         window.__mediaHandlers['play']({ action: 'play' });
@@ -414,23 +485,28 @@ fun WebViewScreen(
                                                         var btn = document.querySelector('button[aria-label*="Previous"], button[title*="Previous"], [class*="prev"], [class*="skip-prev"]');
                                                         if (btn) btn.click();
                                                     }
+                                                } else if (action === 'seek' && typeof arg === 'number') {
+                                                    var audio = document.querySelector('audio');
+                                                    if (audio) {
+                                                        audio.currentTime = arg;
+                                                    }
                                                 }
-                                                setTimeout(notifyAndroid, 300);
+                                                setTimeout(notifyAndroidMedia, 300);
                                             };
 
-                                            document.addEventListener('play', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroid(); }, true);
-                                            document.addEventListener('pause', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroid(); }, true);
-                                            document.addEventListener('playing', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroid(); }, true);
-                                            document.addEventListener('ended', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroid(); }, true);
+                                            document.addEventListener('play', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroidMedia(); }, true);
+                                            document.addEventListener('pause', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroidMedia(); }, true);
+                                            document.addEventListener('playing', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroidMedia(); }, true);
+                                            document.addEventListener('ended', function(e) { if (e.target.tagName === 'AUDIO') notifyAndroidMedia(); }, true);
                                             document.addEventListener('timeupdate', function(e) {
-                                                if (e.target.tagName === 'AUDIO' && (!window.__lastNotifyTime || Date.now() - window.__lastNotifyTime > 1500)) {
+                                                if (e.target.tagName === 'AUDIO' && (!window.__lastNotifyTime || Date.now() - window.__lastNotifyTime > 800)) {
                                                     window.__lastNotifyTime = Date.now();
-                                                    notifyAndroid();
+                                                    notifyAndroidMedia();
                                                 }
                                             }, true);
 
-                                            setInterval(notifyAndroid, 1500);
-                                            notifyAndroid();
+                                            setInterval(notifyAndroidMedia, 1200);
+                                            notifyAndroidMedia();
                                         }
                                     })();
                                 """.trimIndent()
@@ -522,48 +598,100 @@ class AndroidDownloadBridge(
                     lowerName.endsWith(".mov")
 
             val subFolder = if (isVideo) "video" else "music"
+            val appFolder = if (appName.isNotBlank()) appName else "Music@8481"
             val defaultExt = if (isVideo) ".mp4" else if (lowerName.endsWith(".lrc")) ".lrc" else ".mp3"
 
             var fileName = suggestedName ?: ""
             if (fileName.isBlank() || fileName == "downloadfile.bin" || fileName == "blob" || !fileName.contains(".")) {
-                fileName = "download_${System.currentTimeMillis()}$defaultExt"
+                fileName = "song_${System.currentTimeMillis()}$defaultExt"
             }
 
-            // 1. Save to External Storage root (/sdcard/<appName>/<subFolder>/)
-            val externalStorage = Environment.getExternalStorageDirectory()
-            val targetDir = File(File(externalStorage, appName), subFolder)
-            if (!targetDir.exists()) {
-                targetDir.mkdirs()
+            val safeFileName = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+
+            val saved = saveMediaBytes(context, appFolder, safeFileName, mime, isVideo, bytes)
+            if (saved) {
+                onToast("Downloaded $safeFileName to $appFolder/$subFolder")
+            } else {
+                onToast("Failed to save $safeFileName")
             }
-            val targetFile = File(targetDir, fileName)
-            targetFile.writeBytes(bytes)
-
-            // 2. Save to Public Downloads directory (/sdcard/Download/<appName>/<subFolder>/)
-            try {
-                val publicDownload = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                val pubSubDir = File(File(publicDownload, appName), subFolder)
-                if (!pubSubDir.exists()) {
-                    pubSubDir.mkdirs()
-                }
-                File(pubSubDir, fileName).writeBytes(bytes)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-
-            // Refresh media store
-            MediaScannerConnection.scanFile(
-                context,
-                arrayOf(targetFile.absolutePath),
-                arrayOf(mime),
-                null
-            )
-
-            onToast("Downloaded $fileName to $appName/$subFolder")
         } catch (e: Exception) {
             e.printStackTrace()
             onToast("Download failed: ${e.message}")
         }
     }
+}
+
+fun saveMediaBytes(
+    context: Context,
+    appName: String,
+    fileName: String,
+    mimeType: String,
+    isVideo: Boolean,
+    data: ByteArray
+): Boolean {
+    val safeFileName = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    val subFolder = if (isVideo) "video" else "music"
+    val appFolder = if (appName.isNotBlank()) appName else "Music@8481"
+    val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$appFolder/$subFolder/"
+
+    // Android 10+ (API 29+): Use MediaStore API (Scoped Storage compliant)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        try {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, safeFileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val itemUri = context.contentResolver.insert(collection, contentValues)
+            if (itemUri != null) {
+                context.contentResolver.openOutputStream(itemUri)?.use { out ->
+                    out.write(data)
+                    out.flush()
+                }
+                contentValues.clear()
+                contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                context.contentResolver.update(itemUri, contentValues, null, null)
+                return true
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // Fallback: Save to Public Downloads directory (Download/Music@8481/music/ or video/)
+    try {
+        val pubDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val targetDir = File(File(pubDir, appFolder), subFolder)
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+        val file = File(targetDir, safeFileName)
+        file.writeBytes(data)
+        MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf(mimeType), null)
+        return true
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    // App external files dir fallback
+    try {
+        val appDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        if (appDir != null) {
+            val targetDir = File(File(appDir, appFolder), subFolder)
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+            }
+            val file = File(targetDir, safeFileName)
+            file.writeBytes(data)
+            return true
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    return false
 }
 
 private fun triggerDownload(
@@ -576,7 +704,7 @@ private fun triggerDownload(
 ) {
     try {
         var fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-        val mime = mimetype ?: if (fileName.endsWith(".mp4")) "video/mp4" else "audio/mpeg"
+        val mime = mimetype?.takeIf { it.isNotBlank() } ?: if (fileName.endsWith(".mp4")) "video/mp4" else "audio/mpeg"
         val lowerName = fileName.lowercase()
 
         val isVideo = mime.lowercase().startsWith("video/") ||
@@ -588,72 +716,105 @@ private fun triggerDownload(
                 url.lowercase().contains("format=mp4")
 
         val subFolder = if (isVideo) "video" else "music"
+        val appFolder = if (appName.isNotBlank()) appName else "Music@8481"
         val defaultExt = if (isVideo) ".mp4" else if (lowerName.endsWith(".lrc")) ".lrc" else ".mp3"
 
         if (fileName.isBlank() || fileName == "downloadfile.bin" || fileName == "blob" || !fileName.contains(".")) {
-            fileName = "download_${System.currentTimeMillis()}$defaultExt"
+            fileName = "song_${System.currentTimeMillis()}$defaultExt"
         }
 
-        // Ensure directories exist
-        val externalStorage = Environment.getExternalStorageDirectory()
-        val appFolder = File(externalStorage, appName)
-        val targetDir = File(appFolder, subFolder)
-        if (!targetDir.exists()) {
-            targetDir.mkdirs()
-        }
-
-        val publicDownload = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val pubFolder = File(File(publicDownload, appName), subFolder)
-        if (!pubFolder.exists()) {
-            pubFolder.mkdirs()
-        }
-
-        val targetFile = File(targetDir, fileName)
-
-        val request = DownloadManager.Request(Uri.parse(url))
-        request.setMimeType(mime)
-
-        if (!userAgent.isNullOrEmpty()) {
-            request.addRequestHeader("User-Agent", userAgent)
-        }
-
-        val cookies = CookieManager.getInstance().getCookie(url)
-        if (!cookies.isNullOrEmpty()) {
-            request.addRequestHeader("Cookie", cookies)
-        }
-
-        request.setTitle(fileName)
-        request.setDescription("Downloading to $appName/$subFolder...")
-        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        request.setAllowedOverMetered(true)
-        request.setAllowedOverRoaming(true)
-
-        var setSuccess = false
-        try {
-            request.setDestinationUri(Uri.fromFile(targetFile))
-            setSuccess = true
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        if (!setSuccess) {
-            try {
-                request.setDestinationInExternalPublicDir(
-                    Environment.DIRECTORY_DOWNLOADS,
-                    "$appName/$subFolder/$fileName"
-                )
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
+        val safeFileName = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
 
         val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        downloadManager.enqueue(request)
+        val request = DownloadManager.Request(Uri.parse(url)).apply {
+            setMimeType(mime)
+            if (!userAgent.isNullOrEmpty()) {
+                addRequestHeader("User-Agent", userAgent)
+            }
+            val cookies = CookieManager.getInstance().getCookie(url)
+            if (!cookies.isNullOrEmpty()) {
+                addRequestHeader("Cookie", cookies)
+            }
+            setTitle(safeFileName)
+            setDescription("Downloading to $appFolder/$subFolder...")
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setAllowedOverMetered(true)
+            setAllowedOverRoaming(true)
+            // Save to Download/Music@8481/music or Download/Music@8481/video
+            setDestinationInExternalPublicDir(
+                Environment.DIRECTORY_DOWNLOADS,
+                "$appFolder/$subFolder/$safeFileName"
+            )
+        }
 
-        Toast.makeText(context, "Downloading $fileName to $appName/$subFolder...", Toast.LENGTH_SHORT).show()
+        downloadManager.enqueue(request)
+        Toast.makeText(context, "Downloading $safeFileName to $appFolder/$subFolder...", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         e.printStackTrace()
-        Toast.makeText(context, "Failed to start download: ${e.message}", Toast.LENGTH_LONG).show()
+        // If DownloadManager encounters any exception, run direct background download
+        startDirectDownloadFallback(context, appName, url, userAgent, contentDisposition, mimetype)
+    }
+}
+
+private fun startDirectDownloadFallback(
+    context: Context,
+    appName: String,
+    url: String,
+    userAgent: String?,
+    contentDisposition: String?,
+    mimetype: String?
+) {
+    CoroutineScope(Dispatchers.IO).launch {
+        var fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+        val mime = mimetype?.takeIf { it.isNotBlank() } ?: if (fileName.endsWith(".mp4")) "video/mp4" else "audio/mpeg"
+        val lowerName = fileName.lowercase()
+        val isVideo = mime.lowercase().startsWith("video/") || lowerName.endsWith(".mp4")
+        val subFolder = if (isVideo) "video" else "music"
+        val appFolder = if (appName.isNotBlank()) appName else "Music@8481"
+        val defaultExt = if (isVideo) ".mp4" else if (lowerName.endsWith(".lrc")) ".lrc" else ".mp3"
+
+        if (fileName.isBlank() || fileName == "downloadfile.bin" || fileName == "blob" || !fileName.contains(".")) {
+            fileName = "song_${System.currentTimeMillis()}$defaultExt"
+        }
+        val safeFileName = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+
+        withContext(Dispatchers.Main) {
+            Toast.makeText(context, "Downloading $safeFileName to $appFolder/$subFolder...", Toast.LENGTH_SHORT).show()
+        }
+
+        try {
+            val connection = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 30000
+                instanceFollowRedirects = true
+                if (!userAgent.isNullOrEmpty()) {
+                    setRequestProperty("User-Agent", userAgent)
+                }
+                val cookies = CookieManager.getInstance().getCookie(url)
+                if (!cookies.isNullOrEmpty()) {
+                    setRequestProperty("Cookie", cookies)
+                }
+            }
+            connection.connect()
+            val input = connection.inputStream
+            val bytes = input.readBytes()
+            input.close()
+            connection.disconnect()
+
+            val success = saveMediaBytes(context, appFolder, safeFileName, mime, isVideo, bytes)
+            withContext(Dispatchers.Main) {
+                if (success) {
+                    Toast.makeText(context, "Downloaded $safeFileName to $appFolder/$subFolder", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "Download failed", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (err: Exception) {
+            err.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Download failed: ${err.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 }
 
@@ -692,10 +853,46 @@ private fun setupWebSettings(webView: WebView, isOnline: Boolean) {
 
 class AndroidMediaBridge(
     private val context: Context,
-    private val onMediaState: (title: String, artist: String, artworkUrl: String, isPlaying: Boolean) -> Unit
+    private val onMediaState: (
+        title: String,
+        artist: String,
+        artworkUrl: String,
+        isPlaying: Boolean,
+        currentTime: Float,
+        duration: Float
+    ) -> Unit
 ) {
     @JavascriptInterface
-    fun onMediaStateChanged(title: String?, artist: String?, artworkUrl: String?, isPlaying: Boolean) {
-        onMediaState(title ?: "", artist ?: "", artworkUrl ?: "", isPlaying)
+    fun onMediaStateChanged(
+        title: String?,
+        artist: String?,
+        artworkUrl: String?,
+        isPlaying: Boolean,
+        currentTime: Float,
+        duration: Float
+    ) {
+        val safeTitle = title?.trim() ?: ""
+        val safeArtist = artist?.trim() ?: ""
+        val safeArtwork = artworkUrl?.trim() ?: ""
+
+        // Forward to background MediaNotificationService
+        if (safeTitle.isNotBlank() || isPlaying) {
+            com.example.service.MediaControllerHelper.updateState(
+                context = context,
+                title = safeTitle,
+                artist = safeArtist,
+                artworkUrl = safeArtwork,
+                isPlaying = isPlaying
+            )
+        }
+
+        onMediaState(
+            safeTitle,
+            safeArtist,
+            safeArtwork,
+            isPlaying,
+            currentTime,
+            duration
+        )
     }
 }

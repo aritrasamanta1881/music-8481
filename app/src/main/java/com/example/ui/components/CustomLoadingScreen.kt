@@ -83,16 +83,16 @@ fun CustomLoadingScreen(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier.size(160.dp)
                 ) {
-                    // Subtle background glow circle
+                    // Subtle background glow circle matching neon cyan / magenta
                     Box(
                         modifier = Modifier
-                            .size(140.dp)
+                            .size(150.dp)
                             .clip(CircleShape)
                             .background(
                                 Brush.radialGradient(
                                     colors = listOf(
-                                        GreenPrimary.copy(alpha = 0.4f),
-                                        MusicPurple.copy(alpha = 0.15f),
+                                        Color(0xFF00E5FF).copy(alpha = 0.45f),
+                                        Color(0xFFD500F9).copy(alpha = 0.25f),
                                         Color.Transparent
                                     )
                                 )
@@ -106,8 +106,8 @@ fun CustomLoadingScreen(
                         modifier = Modifier
                             .size(120.dp)
                             .scale(logoScale)
-                            .shadow(16.dp, CircleShape)
-                            .clip(CircleShape)
+                            .shadow(16.dp, RoundedCornerShape(24.dp))
+                            .clip(RoundedCornerShape(24.dp))
                     )
                 }
 
